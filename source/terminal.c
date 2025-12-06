@@ -157,15 +157,14 @@ int main(void) {
       mvaddch(5, i, ACS_HLINE);
     }
 
-    Card example_card = {COL_RED, VAL_5}; // Красная пятерка
-    printCardFancy(10, 7, &example_card);
-
     // Несколько карт в ряд
-    Card cards[3] = {{COL_BLUE, VAL_7},
+    Card cards[5] = {{COL_RED, VAL_0},
+                     {COL_YELLOW, VAL_4},
+                     {COL_BLUE, VAL_7},
                      {COL_GREEN, VAL_REVERSE},
                      {COL_WILD, VAL_WILD_DRAW_FOUR}};
 
-    printCardsInRow(cards, 3, 19, 7);
+    printCardsInRow(cards, 5, 10, 7);
     // Или используя функцию для руки
     // printHand(&player_hand, 10, 15); // Линия перед вводом
 
