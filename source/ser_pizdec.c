@@ -1,105 +1,10 @@
 #include "server.h"
+#include "uno_rules.h"
+
 int client_count = 0;
 Room *rooms = NULL;
 pthread_mutex_t rooms_mutex = PTHREAD_MUTEX_INITIALIZER;
 ClientInfo clients[MAX_CONNECTIONS];
-
-void create_uno_deck(Deck *deck) {
-  int index = 0;
-
-  for (Color c = COL_RED; c <= COL_BLUE; c++) {
-    deck->cards[index++] = (Card){c, VAL_0};
-
-    for (Value v = VAL_1; v <= VAL_9; v++) {
-      deck->cards[index++] = (Card){c, v};
-      deck->cards[index++] = (Card){c, v};
-    }
-
-    for (int i = 0; i < 2; i++) {
-      deck->cards[index++] = (Card){c, VAL_SKIP};
-      deck->cards[index++] = (Card){c, VAL_REVERSE};
-      deck->cards[index++] = (Card){c, VAL_DRAW_TWO};
-    }
-  }
-
-  for (int i = 0; i < 4; i++)
-    deck->cards[index++] = (Card){COL_WILD, VAL_WILD};
-
-  for (int i = 0; i < 4; i++)
-    deck->cards[index++] = (Card){COL_WILD, VAL_WILD_DRAW_FOUR};
-
-  deck->top = 0;
-}
-
-void shuffle_deck(Deck *deck) {
-  for (int i = UNO_DECK_SIZE - 1; i > 0; i--) {
-    int j = rand() % (i + 1);
-    Card temp = deck->cards[i];
-    deck->cards[i] = deck->cards[j];
-    deck->cards[j] = temp;
-  }
-}
-
-Card draw_card(Deck *deck) {
-  if (deck->top < UNO_DECK_SIZE) {
-    return deck->cards[deck->top++];
-  }
-  return (Card){COL_WILD, VAL_WILD};
-}
-
-const char *color_to_string(Color color) {
-  switch (color) {
-  case COL_RED:
-    return "red";
-  case COL_YELLOW:
-    return "yellow";
-  case COL_GREEN:
-    return "green";
-  case COL_BLUE:
-    return "blue";
-  case COL_WILD:
-    return "wild";
-  default:
-    return "unknown";
-  }
-}
-
-const char *value_to_string(Value value) {
-  switch (value) {
-  case VAL_0:
-    return "0";
-  case VAL_1:
-    return "1";
-  case VAL_2:
-    return "2";
-  case VAL_3:
-    return "3";
-  case VAL_4:
-    return "4";
-  case VAL_5:
-    return "5";
-  case VAL_6:
-    return "6";
-  case VAL_7:
-    return "7";
-  case VAL_8:
-    return "8";
-  case VAL_9:
-    return "9";
-  case VAL_SKIP:
-    return "skip";
-  case VAL_REVERSE:
-    return "reverse";
-  case VAL_DRAW_TWO:
-    return "draw_two";
-  case VAL_WILD:
-    return "wild";
-  case VAL_WILD_DRAW_FOUR:
-    return "wild_draw_four";
-  default:
-    return "unknown";
-  }
-}
 
 cJSON *create_card_json(Card card) {
   cJSON *card_obj = cJSON_CreateObject();
@@ -359,16 +264,6 @@ void next_player_room(Room *room) {
   room->last_activity = time(NULL);
 }
 
-bool can_play_card(Card player_card, Color current_color, Card top_card) {
-  if (player_card.color == COL_WILD)
-    return true;
-  if (player_card.color == current_color)
-    return true;
-  if (player_card.value == top_card.value)
-    return true;
-  return false;
-}
-
 char *handle_room_command(Room *room, int client_fd, const char *command) {
   if (!room)
     return NULL;
@@ -433,7 +328,13 @@ char *handle_room_command(Room *room, int client_fd, const char *command) {
       cJSON_AddStringToObject(response, "error", "Game not in progress");
     } else if (player_index != room->game.current_player) {
       cJSON_AddStringToObject(response, "error", "Not your turn");
-    } else {
+    } else if ((room->game.draw_accumulator > 0) &&
+               (room->game.player_to_draw == player_index)) {
+      cJSON_AddStringToObject(response, "error",
+                              "You must draw cards before playing");
+    }
+
+    else {
       int card_index = atoi(command + 6);
       Player *p = &room->game.players[player_index];
 
@@ -459,26 +360,7 @@ char *handle_room_command(Room *room, int client_fd, const char *command) {
             room->game.current_color = played_card.color;
           }
 
-          if (played_card.value == VAL_SKIP) {
-            next_player_room(room);
-          } else if (played_card.value == VAL_REVERSE) {
-            room->game.direction_clockwise = !room->game.direction_clockwise;
-          } else if (played_card.value == VAL_DRAW_TWO) {
-            room->game.draw_accumulator += 2;
-            room->game.player_to_draw =
-                (room->game.current_player +
-                 (room->game.direction_clockwise ? 1 : -1) +
-                 room->game.players_count) %
-                room->game.players_count;
-          } else if (played_card.value == VAL_WILD_DRAW_FOUR) {
-            room->game.draw_accumulator += 4;
-            room->game.player_to_draw =
-                (room->game.current_player +
-                 (room->game.direction_clockwise ? 1 : -1) +
-                 room->game.players_count) %
-                room->game.players_count;
-          }
-
+          apply_card_effect(&room->game, played_card);
           if (p->hand_size == 0) {
             room->game.state = ROUND_ENDED;
             cJSON_AddBoolToObject(response, "round_won", true);
@@ -488,7 +370,7 @@ char *handle_room_command(Room *room, int client_fd, const char *command) {
                      p->name);
             broadcast_to_room(room, win_msg, -1);
           } else {
-            next_player_room(room);
+            advance_turn(&room->game);
           }
 
           cJSON_AddStringToObject(response, "result", "success");
@@ -500,7 +382,6 @@ char *handle_room_command(Room *room, int client_fd, const char *command) {
         }
       }
     }
-
   } else if (strcmp(command, "/draw") == 0) {
     if (room->game.state != IN_PROGRESS) {
       cJSON_AddStringToObject(response, "error", "Game not in progress");
@@ -509,21 +390,34 @@ char *handle_room_command(Room *room, int client_fd, const char *command) {
     } else {
       Player *p = &room->game.players[player_index];
 
-      if (room->game.draw_pile.top < UNO_DECK_SIZE && p->hand_size < 20) {
-        Card drawn_card = draw_card(&room->game.draw_pile);
-        p->hand[p->hand_size++] = drawn_card;
+      int cards_to_draw = 1;
 
-        cJSON_AddStringToObject(response, "result", "success");
-        cJSON_AddStringToObject(response, "message", "Card drawn");
-        cJSON_AddItemToObject(response, "card", create_card_json(drawn_card));
-
-        next_player_room(room);
-        room->last_activity = time(NULL);
-      } else {
-        cJSON_AddStringToObject(response, "error", "Cannot draw card");
+      if (room->game.draw_accumulator > 0 &&
+          room->game.player_to_draw == player_index) {
+        cards_to_draw = room->game.draw_accumulator;
       }
-    }
 
+      cJSON *drawn_cards = cJSON_CreateArray();
+
+      for (int i = 0; i < cards_to_draw; i++) {
+        if (room->game.draw_pile.top < UNO_DECK_SIZE && p->hand_size < 20) {
+
+          Card c = draw_card(&room->game.draw_pile);
+          p->hand[p->hand_size++] = c;
+          cJSON_AddItemToArray(drawn_cards, create_card_json(c));
+        }
+      }
+
+      room->game.draw_accumulator = 0;
+      room->game.player_to_draw = -1;
+
+      cJSON_AddStringToObject(response, "result", "success");
+      cJSON_AddStringToObject(response, "message", "Cards drawn");
+      cJSON_AddItemToObject(response, "cards", drawn_cards);
+
+      advance_turn(&room->game);
+      room->last_activity = time(NULL);
+    }
   } else if (strcmp(command, "/state") == 0) {
     cJSON_AddStringToObject(response, "type", "game_state");
     cJSON_AddNumberToObject(response, "game_state", room->game.state);
@@ -571,7 +465,6 @@ char *handle_room_command(Room *room, int client_fd, const char *command) {
       cJSON_AddItemToArray(players_array, player_obj);
     }
     cJSON_AddItemToObject(response, "players", players_array);
-
   } else if (strcmp(command, "/hand") == 0) {
     Player *p = &room->game.players[player_index];
     cJSON_AddStringToObject(response, "type", "hand");
@@ -585,7 +478,6 @@ char *handle_room_command(Room *room, int client_fd, const char *command) {
     }
     cJSON_AddItemToObject(response, "hand", hand_array);
     cJSON_AddNumberToObject(response, "hand_size", p->hand_size);
-
   } else if (strncmp(command, "/color ", 7) == 0) {
     if (room->game.state == IN_PROGRESS &&
         player_index == room->game.current_player) {
@@ -612,12 +504,10 @@ char *handle_room_command(Room *room, int client_fd, const char *command) {
     } else {
       cJSON_AddStringToObject(response, "error", "Cannot set color now");
     }
-
   } else if (strcmp(command, "/save") == 0) {
     save_game_state(room);
     cJSON_AddStringToObject(response, "result", "success");
     cJSON_AddStringToObject(response, "message", "Game saved");
-
   } else {
     cJSON_AddStringToObject(response, "error", "Unknown command");
   }
