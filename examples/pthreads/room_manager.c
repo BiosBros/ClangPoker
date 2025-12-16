@@ -54,44 +54,21 @@ int create_room_process(int room_id, int max_participants) {
   return -1;
 }
 
-void transfer_to_room(int client_fd, int desired_participants) {
-  printf("Поиск комнаты для клиента %d (желает %d участников)\n", client_fd,
-         desired_participants);
-
-  RoomProcess *room = find_room_by_participants(desired_participants);
-
-  if (!room) {
-    static int next_room_id = 1;
-    int room_id = next_room_id++;
-
-    printf("Создаем новую комнату %d с лимитом %d\n", room_id,
-           desired_participants);
-
-    int room_index = create_room_process(room_id, desired_participants);
-    if (room_index < 0) {
-      printf("Не удалось создать комнату\n");
-      close(client_fd);
-      return;
-    }
-    room = &rooms[room_index];
-  }
-
-  set_nonblocking(client_fd);
-
-  printf("[DEBUG] Передаем клиента fd=%d в комнату %d\n", client_fd,
-         room->room_id);
-
-  if (send_fd(room->control_fd, client_fd) < 0) {
-    perror("send_fd");
-    close(client_fd);
+void transfer_to_room(int client_fd, int desired_players) {
+  RoomProcess *room = find_room_by_participants(desired_players);
+  if (!room)
     return;
-  }
 
-  room->client_count++;
-  printf("Клиент %d передан в комнату %d (клиентов: %d/%d)\n", client_fd,
-         room->room_id, room->client_count, room->max_participants);
+  // отправляем JSON
+  Message m = {0};
+  m.type = MSG_JOIN_ROOM;
 
-  remove_client(client_fd);
+  char *json = build_json_message(m.type, &m);
+  send_all(room->control_fd, json, strlen(json));
+  free(json);
+
+  // отправляем FD
+  send_fd(room->control_fd, client_fd);
 }
 
 void remove_client(int client_fd) {

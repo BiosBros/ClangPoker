@@ -1,4 +1,5 @@
 #include "server.h"
+#include "protocol.h"
 
 int run_server() {
   int server_fd = create_server_socket(SERVER_PORT);
@@ -25,8 +26,15 @@ int run_server() {
            ntohs(client_addr.sin_port), client_fd);
 
     handle_unknown(client_fd);
-    int desired_participants = handle_lobby(client_fd);
-    transfer_to_room(client_fd, desired_participants);
+    int players = handle_lobby(client_fd);
+
+    RoomProcess *r = find_room_by_participants(players);
+    if (!r) {
+      int room_id = find_free_room(); // TODO: сделать вот эту вот функцию
+      create_room_process(room_id, players);
+      r = &rooms[room_id];
+    }
+    transfer_to_room(client_fd, players);
   }
 
   close(server_fd);
@@ -43,55 +51,50 @@ int find_free_client_slot() {
 }
 
 void handle_unknown(int client_fd) {
-  printf("Обработка UNKNOWN для клиента %d\n", client_fd);
+  char buf[BUFFER_SIZE];
+  ssize_t n = recv(client_fd, buf, sizeof(buf) - 1, 0);
+  if (n <= 0)
+    return;
 
-  char *welcome_msg = "Добро пожаловать! Введите ваше имя: ";
-  ssize_t sent = send_all(client_fd, welcome_msg, strlen(welcome_msg));
-  printf("[DEBUG] Отправлено приветствие: %ld байт\n", sent);
+  buf[n] = 0;
 
-  char buffer[BUFFER_SIZE];
-  ssize_t bytes = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
-
-  if (bytes > 0) {
-    buffer[bytes] = '\0';
-    printf("Клиент %d представился как: %s\n", client_fd, buffer);
-
-    int slot = find_free_client_slot();
-    if (slot >= 0) {
-      clients[slot].socket = client_fd;
-      clients[slot].state = CLIENT_IN_LOBBY;
-      strncpy(clients[slot].username, buffer,
-              sizeof(clients[slot].username) - 1);
-      client_count++;
-    }
+  Message msg;
+  if (!parse_json_message(buf, &msg) || msg.type != MSG_HELLO) {
+    Message err = {.type = MSG_ERROR};
+    strcpy(err.text, "expected HELLO");
+    char *out = build_json_message(MSG_ERROR, &err);
+    send_all(client_fd, out, strlen(out));
+    free(out);
+    return;
   }
+
+  int slot = find_free_client_slot();
+  if (slot < 0)
+    return;
+
+  clients[slot].socket = client_fd;
+  clients[slot].state = CLIENT_IN_LOBBY;
+  strncpy(clients[slot].username, msg.username, 31);
+
+  Message ok = {.type = MSG_SYSTEM};
+  strcpy(ok.text, "hello accepted");
+  char *out = build_json_message(MSG_SYSTEM, &ok);
+  send_all(client_fd, out, strlen(out));
+  free(out);
 }
 
 int handle_lobby(int client_fd) {
-  printf("Обработка LOBBY для клиента %d\n", client_fd);
+  char buf[BUFFER_SIZE];
+  ssize_t n = recv(client_fd, buf, sizeof(buf) - 1, 0);
+  if (n <= 0)
+    return -1;
 
-  char *question =
-      "Введите желаемое количество участников в комнате (от 1 до 10): ";
-  send_all(client_fd, question, strlen(question));
+  buf[n] = 0;
 
-  char buffer[BUFFER_SIZE];
-  ssize_t bytes = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
-
-  if (bytes > 0) {
-    buffer[bytes] = '\0';
-    int desired_participants = atoi(buffer);
-
-    if (desired_participants >= 1 && desired_participants <= 10) {
-      printf("Клиент %d хочет комнату с %d участниками\n", client_fd,
-             desired_participants);
-      return desired_participants;
-    } else {
-      send_all(client_fd,
-               "Некорректный ввод. Используем значение по умолчанию (3).\n",
-               60);
-      return 3;
-    }
+  Message msg;
+  if (!parse_json_message(buf, &msg) || msg.type != MSG_JOIN_ROOM) {
+    return -1;
   }
 
-  return 3;
+  return msg.players > 0 ? msg.players : 3;
 }

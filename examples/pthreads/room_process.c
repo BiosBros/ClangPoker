@@ -1,4 +1,5 @@
 #include "room_process.h"
+#include "protocol.h"
 
 void room_process(int room_id, int parent_fd, int max_participants) {
   printf("[Комната %d PID=%d] Запущена. Максимум участников: %d\n", room_id,
@@ -20,16 +21,11 @@ void room_process(int room_id, int parent_fd, int max_participants) {
     exit(1);
   }
 
-  int client_fds[100] = {0};
-  int client_count = 0;
-  int spam_sent = 0;
+  int participants[max_participants];
+  int count = 0;
+  char buf[1024];
 
   struct epoll_event events[10];
-
-  char ready_msg[100];
-  snprintf(ready_msg, sizeof(ready_msg),
-           "Комната %d готова к работе (PID=%d)\n", room_id, getpid());
-  send_all(parent_fd, ready_msg, strlen(ready_msg));
 
   while (1) {
     int n = epoll_wait(epoll_fd, events, 10, -1);
@@ -42,141 +38,53 @@ void room_process(int room_id, int parent_fd, int max_participants) {
       int fd = events[i].data.fd;
 
       if (fd == parent_fd) {
-        while (1) {
-          int new_client_fd = receive_fd(parent_fd);
-          if (new_client_fd < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-              break; // fd пока нет — это нормально
-            }
-            perror("receive_fd");
-            break;
-          }
-          printf("[Комната %d] Получен клиент fd=%d\n", +room_id,
-                 new_client_fd); // Проверяем лимит
+        // сервер прислал JSON + клиентский FD
+        ssize_t n = recv(fd, buf, sizeof(buf) - 1, 0);
+        if (n <= 0)
+          continue;
+        buf[n] = 0;
 
-          if (client_count >= max_participants) {
-            printf("[Комната %d] Лимит достигнут! Отказ клиенту fd=%d\n",
-                   room_id, new_client_fd);
+        Message msg;
+        if (!parse_json_message(buf, &msg))
+          continue;
 
-            char *reject_msg = "Комната заполнена!\n";
-            send_all(new_client_fd, reject_msg, strlen(reject_msg));
-            close(new_client_fd);
-            continue;
-          }
+        if (msg.type == MSG_JOIN_ROOM) {
 
-          set_nonblocking(new_client_fd);
+          int client_fd = receive_fd(parent_fd);
 
-          struct epoll_event client_ev;
-          client_ev.events = EPOLLIN | EPOLLET;
-          client_ev.data.fd = new_client_fd;
+          participants[count++] = client_fd;
 
-          if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, new_client_fd, &client_ev) <
-              0) {
-            perror("epoll_ctl client");
-            close(new_client_fd);
-            continue;
-          }
+          // уведомить клиента
+          Message ready = {.type = MSG_ROOM_READY};
+          strcpy(ready.text, "joined room");
+          char *out = build_json_message(ready.type, &ready);
+          send_all(client_fd, out, strlen(out));
+          free(out);
 
-          client_fds[client_count++] = new_client_fd;
-
-          char welcome[BUFFER_SIZE];
-          snprintf(welcome, sizeof(welcome),
-                   "Добро пожаловать в комнату %d! Участников: %d/%d\n",
-                   room_id, client_count, max_participants);
-
-          ssize_t sent = send_all(new_client_fd, welcome, strlen(welcome));
-          printf(
-              "[Комната %d] Отправлено приветствие клиенту fd=%d: %ld байт\n",
-              room_id, new_client_fd, sent);
-
-          if (client_count == max_participants && !spam_sent) {
-            printf("[Комната %d] Лимит достигнут! Отправляем спам\n", room_id);
-
-            for (int j = 0; j < client_count; j++) {
-              char *limit_msg = "\n=== ЛИМИТ УЧАСТНИКОВ ДОСТИГНУТ! ===\n";
-              send_all(client_fds[j], limit_msg, strlen(limit_msg));
-              send_spam_to_client(client_fds[j]);
-            }
-            spam_sent = 1;
-          }
+          // слушать клиента в epoll
+          ev.events = EPOLLIN;
+          ev.data.fd = client_fd;
+          epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &ev);
         }
-
       } else {
-        char buffer[BUFFER_SIZE];
-        ssize_t bytes = recv(fd, buffer, sizeof(buffer) - 1, 0);
+        ssize_t n = recv(fd, buf, sizeof(buf) - 1, 0);
+        if (n <= 0)
+          continue;
+        buf[n] = 0;
 
-        if (bytes <= 0) {
-          if (bytes == 0) {
-            printf("[Комната %d] Клиент fd=%d отключился\n", room_id, fd);
-          } else {
-            printf("[Комната %d] Ошибка чтения от клиента fd=%d: %s\n", room_id,
-                   fd, strerror(errno));
+        Message msg;
+        if (!parse_json_message(buf, &msg))
+          continue;
+
+        // чат в комнате → форвард всем
+        if (msg.type == MSG_CHAT) {
+          for (int k = 0; k < count; k++) {
+            char *out = build_json_message(MSG_ROOM_FORWARD, &msg);
+            send_all(participants[k], out, strlen(out));
+            free(out);
           }
-
-          epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL);
-
-          for (int j = 0; j < client_count; j++) {
-            if (client_fds[j] == fd) {
-              client_fds[j] = client_fds[client_count - 1];
-              client_count--;
-              break;
-            }
-          }
-
-          if (client_count < max_participants) {
-            spam_sent = 0;
-          }
-
-          close(fd);
-        } else {
-          buffer[bytes] = '\0';
-          printf("[Комната %d] Сообщение от fd=%d: %s\n", room_id, fd, buffer);
-
-          char response[BUFFER_SIZE];
-          snprintf(response, sizeof(response), "[Комната %d] Эхо: %.900s",
-                   room_id, buffer);
-
-          ssize_t sent = send_all(fd, response, strlen(response));
-          printf("[Комната %d] Отправлен ответ клиенту fd=%d: %ld байт\n",
-                 room_id, fd, sent);
         }
       }
     }
   }
-}
-
-void send_spam_to_client(int client_fd) {
-  printf("[DEBUG] Отправляем спам клиенту fd=%d\n", client_fd);
-
-  char *spam_messages[] = {"SPAM: Бесплатные деньги!\n",
-                           "SPAM: Вы выиграли iPhone!\n",
-                           "SPAM: Срочно! Ваш аккаунт взломали!\n",
-                           "SPAM: Инвестируйте в криптовалюту!\n",
-                           "SPAM: Скидка 90% только сегодня!\n",
-                           "SPAM: Ваша карта заблокирована!\n",
-                           "SPAM: Наследство из Нигерии!\n",
-                           "SPAM: Ваш компьютер заражен!\n",
-                           "SPAM: Срочный звонок из банка!\n",
-                           "SPAM: Активируйте бонусы!\n"};
-
-  int num_messages = 5 + rand() % 6;
-
-  for (int i = 0; i < num_messages; i++) {
-    char msg[BUFFER_SIZE];
-    snprintf(msg, sizeof(msg), "[%d/%d] %s", i + 1, num_messages,
-             spam_messages[rand() % 10]);
-
-    ssize_t sent = send_all(client_fd, msg, strlen(msg));
-    printf("[DEBUG] Отправлено %ld байт спама клиенту fd=%d\n", sent,
-           client_fd);
-
-    if (sent <= 0) {
-      printf("[DEBUG] Ошибка отправки спама: %s\n", strerror(errno));
-    }
-
-    usleep(200000);
-  }
-
-  char *limit_msg = "=== КОНЕЦ СПАМА ===\n";
-  send_all(client_fd, limit_msg, strlen(limit_msg));
 }
