@@ -1,16 +1,209 @@
-#include "client.h"
-#include <string.h>
+#include "json_utils.h"
+#include <arpa/inet.h>
+#include <ctype.h>
+#include <netinet/in.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/select.h>
+#include <unistd.h>
 
-int client_init(Client *c, int fd) {
-  c->socket = fd;
-  c->state = CLIENT_UNKNOWN;
-  c->room_id = -1;
-  memset(c->username, 0, sizeof(c->username));
-  return 0;
+#define BUFFER_SIZE 2048
+#define SERVER_PORT 8080
+
+char server_ip[INET_ADDRSTRLEN];
+
+// Функции предобработки данных
+void clean_input(char *input) {
+  // Убираем символы новой строки
+  size_t len = strlen(input);
+  if (len > 0 && (input[len - 1] == '\n' || input[len - 1] == '\r')) {
+    input[len - 1] = '\0';
+  }
+  if (len > 1 && (input[len - 2] == '\r')) {
+    input[len - 2] = '\0';
+  }
 }
 
-void client_reset(Client *c) {
-  c->socket = 0;
-  c->state = CLIENT_UNKNOWN;
-  c->room_id = -1;
+int validate_and_parse_players(const char *input) {
+  for (int i = 0; input[i] != '\0'; i++) {
+    if (!isdigit((unsigned char)input[i])) {
+      return 2;
+    }
+  }
+
+  int players = atoi(input);
+
+  if (players < 2)
+    return 2;
+  if (players > 6)
+    return 6;
+
+  return players;
+}
+
+int connect_to_server() {
+  int sock = socket(AF_INET, SOCK_STREAM, 0);
+  if (sock < 0) {
+    perror("socket");
+    return -1;
+  }
+
+  struct sockaddr_in server_addr;
+  server_addr.sin_family = AF_INET;
+  server_addr.sin_port = htons(SERVER_PORT);
+
+  if (inet_pton(AF_INET, server_ip, &server_addr.sin_addr) <= 0) {
+    perror("inet_pton");
+    close(sock);
+    return -1;
+  }
+
+  if (connect(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+    perror("connect");
+    close(sock);
+    return -1;
+  }
+
+  printf("Подключено к серверу %s:%d\n", server_ip, SERVER_PORT);
+  return sock;
+}
+
+void interactive_mode(int sock) {
+  fd_set readfds;
+  char user_input[512];
+  Message msg = {0};
+  Message response = {0};
+
+  printf("\n=== ДОБРО ПОЖАЛОВАТЬ В ИГРОВОЙ КЛИЕНТ ===\n");
+  printf("Все сообщения обмениваются в формате JSON\n");
+
+  // Этап 1: Получаем приветственное сообщение
+  if (receive_json_message(sock, &response)) {
+    if (response.type == MSG_SYSTEM && response.text[0]) {
+      printf("Сервер: %s\n", response.text);
+    }
+  }
+
+  // Этап 2: Ввод имени
+  printf("Введите ваше имя: ");
+  fgets(user_input, sizeof(user_input), stdin);
+  clean_input(user_input);
+
+  // Проверка имени
+  if (strlen(user_input) == 0) {
+    strcpy(user_input, "Гость");
+  } else if (strlen(user_input) > 31) {
+    user_input[31] = '\0';
+  }
+
+  msg.type = MSG_HELLO;
+  strncpy(msg.username, user_input, sizeof(msg.username) - 1);
+  send_json_message(sock, MSG_HELLO, &msg);
+  printf("Отправлено имя: %s\n", user_input);
+
+  // Этап 3: Ввод количества игроков
+  if (receive_json_message(sock, &response)) {
+    if (response.type == MSG_SYSTEM && response.text[0]) {
+      printf("Сервер: %s\n", response.text);
+    }
+  }
+
+  printf("Введите желаемое количество участников в комнате: ");
+  fgets(user_input, sizeof(user_input), stdin);
+  clean_input(user_input);
+
+  int players = validate_and_parse_players(user_input);
+  printf("Используется значение: %d игроков\n", players);
+
+  msg.type = MSG_JOIN_ROOM;
+  msg.players = players;
+  send_json_message(sock, MSG_JOIN_ROOM, &msg);
+  printf("Запрошена комната на %d участников\n", players);
+
+  // Этап 4: Ожидание подтверждения и переход в комнату
+  if (receive_json_message(sock, &response)) {
+    if (response.type == MSG_SYSTEM && response.text[0]) {
+      printf("Сервер: %s\n", response.text);
+    }
+  }
+
+  printf("\n=== ВЫ В КОМНАТЕ ===\n");
+  printf("Введите сообщения для общения с другими участниками\n");
+  printf("Для выхода введите 'exit' или нажмите Ctrl+C\n\n");
+
+  // Основной цикл обмена сообщениями
+  while (1) {
+    FD_ZERO(&readfds);
+    FD_SET(sock, &readfds);
+    FD_SET(STDIN_FILENO, &readfds);
+
+    int max_fd = sock > STDIN_FILENO ? sock : STDIN_FILENO;
+
+    if (select(max_fd + 1, &readfds, NULL, NULL, NULL) < 0) {
+      perror("select");
+      break;
+    }
+
+    // Проверяем ввод пользователя
+    if (FD_ISSET(STDIN_FILENO, &readfds)) {
+      fgets(user_input, sizeof(user_input), stdin);
+      clean_input(user_input);
+
+      if (strcmp(user_input, "exit") == 0) {
+        printf("Выход...\n");
+        break;
+      }
+
+      msg.type = MSG_CHAT;
+      strncpy(msg.text, user_input, sizeof(msg.text) - 1);
+      send_json_message(sock, MSG_CHAT, &msg);
+    }
+
+    // Проверяем сообщения от сервера
+    if (FD_ISSET(sock, &readfds)) {
+      if (receive_json_message(sock, &response)) {
+        switch (response.type) {
+        case MSG_ROOM_READY:
+        case MSG_ROOM_FORWARD:
+        case MSG_CHAT:
+        case MSG_SYSTEM:
+          if (response.text[0]) {
+            printf("%s\n", response.text);
+          }
+          break;
+        case MSG_ERROR:
+          printf("ОШИБКА: %s\n", response.text);
+          break;
+        default:
+          printf("Неизвестный тип сообщения\n");
+          break;
+        }
+      } else {
+        printf("Соединение с сервером разорвано\n");
+        break;
+      }
+    }
+  }
+}
+
+int main(int argc, char *argv[]) {
+  if (argc < 2) {
+    printf("Usage: %s <server_ip>\n", argv[0]);
+    exit(EXIT_FAILURE);
+  }
+  snprintf(server_ip, INET_ADDRSTRLEN, "%s", argv[1]);
+
+  printf("=== ИГРОВОЙ КЛИЕНТ ===\n");
+  printf("Подключение к серверу...\n");
+
+  int sock = connect_to_server();
+  if (sock < 0) {
+    return 1;
+  }
+
+  interactive_mode(sock);
+
+  close(sock);
+  printf("Клиент завершил работу\n");
+  return 0;
 }

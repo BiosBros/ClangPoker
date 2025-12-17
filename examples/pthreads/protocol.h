@@ -1,6 +1,3 @@
-#ifndef PROTOCOL_H
-#define PROTOCOL_H
-
 #include <stdbool.h>
 
 typedef enum {
@@ -9,11 +6,9 @@ typedef enum {
   MSG_CHAT,
   MSG_SYSTEM,
   MSG_ERROR,
-
-  // новые — для работы комнат
-  MSG_ROOM_READY,   // room → client
-  MSG_ROOM_FORWARD, // room → all clients (chat)
-  MSG_ROOM_EVENT    // room → client (например, начало игры)
+  MSG_ROOM_READY,
+  MSG_ROOM_FORWARD,
+  MSG_ROOM_EVENT
 } MessageType;
 
 typedef struct {
@@ -23,7 +18,7 @@ typedef struct {
   char text[512];
 } Message;
 
+MessageType type_from_string(const char *s);
+const char *type_to_string(MessageType type);
 bool parse_json_message(const char *json, Message *out);
 char *build_json_message(MessageType type, const Message *msg);
-
-#endif
