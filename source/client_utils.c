@@ -123,7 +123,6 @@ void parse_game_state(const char *json_string) {
 
     if (strcmp(type_str, "game_state") == 0) {
       cJSON *game_state = cJSON_GetObjectItem(root, "game_state");
-      cJSON *current_player = cJSON_GetObjectItem(root, "current_player");
       cJSON *your_turn = cJSON_GetObjectItem(root, "your_turn");
       cJSON *top_card_obj = cJSON_GetObjectItem(root, "top_card");
       cJSON *current_color_obj = cJSON_GetObjectItem(root, "current_color");

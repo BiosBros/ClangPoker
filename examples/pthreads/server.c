@@ -1,4 +1,5 @@
 #include "server.h"
+#include "common.h"
 #include "protocol.h"
 
 int run_server() {
@@ -7,7 +8,7 @@ int run_server() {
     return 1;
   }
 
-  printf("Сервер запущен. Ожидание подключений...\n");
+  printf("Сервер запущен.\n");
 
   while (1) {
     struct sockaddr_in client_addr;
@@ -28,12 +29,6 @@ int run_server() {
     handle_unknown(client_fd);
     int players = handle_lobby(client_fd);
 
-    RoomProcess *r = find_room_by_participants(players);
-    if (!r) {
-      int room_id = find_free_room(); // TODO: сделать вот эту вот функцию
-      create_room_process(room_id, players);
-      r = &rooms[room_id];
-    }
     transfer_to_room(client_fd, players);
   }
 
@@ -51,50 +46,57 @@ int find_free_client_slot() {
 }
 
 void handle_unknown(int client_fd) {
+  // Отправляем запрос имени
+  Message ask = {.type = MSG_SYSTEM};
+  strcpy(ask.text, "enter username");
+  char *a = build_json_message(MSG_SYSTEM, &ask);
+  send_all(client_fd, a, strlen(a));
+  free(a);
+
   char buf[BUFFER_SIZE];
   ssize_t n = recv(client_fd, buf, sizeof(buf) - 1, 0);
   if (n <= 0)
     return;
-
   buf[n] = 0;
 
   Message msg;
   if (!parse_json_message(buf, &msg) || msg.type != MSG_HELLO) {
-    Message err = {.type = MSG_ERROR};
-    strcpy(err.text, "expected HELLO");
-    char *out = build_json_message(MSG_ERROR, &err);
-    send_all(client_fd, out, strlen(out));
-    free(out);
+    Message e = {.type = MSG_ERROR};
+    strcpy(e.text, "expected HELLO");
+    char *js = build_json_message(MSG_ERROR, &e);
+    send_all(client_fd, js, strlen(js));
+    free(js);
     return;
   }
 
   int slot = find_free_client_slot();
-  if (slot < 0)
-    return;
-
   clients[slot].socket = client_fd;
+  strcpy(clients[slot].username, msg.username);
   clients[slot].state = CLIENT_IN_LOBBY;
-  strncpy(clients[slot].username, msg.username, 31);
 
   Message ok = {.type = MSG_SYSTEM};
   strcpy(ok.text, "hello accepted");
-  char *out = build_json_message(MSG_SYSTEM, &ok);
-  send_all(client_fd, out, strlen(out));
-  free(out);
+  char *js = build_json_message(MSG_SYSTEM, &ok);
+  send_all(client_fd, js, strlen(js));
+  free(js);
 }
 
 int handle_lobby(int client_fd) {
+  Message ask = {.type = MSG_SYSTEM};
+  strcpy(ask.text, "enter desired players count");
+  char *js = build_json_message(MSG_SYSTEM, &ask);
+  send_all(client_fd, js, strlen(js));
+  free(js);
+
   char buf[BUFFER_SIZE];
   ssize_t n = recv(client_fd, buf, sizeof(buf) - 1, 0);
   if (n <= 0)
-    return -1;
-
+    return 3;
   buf[n] = 0;
 
   Message msg;
-  if (!parse_json_message(buf, &msg) || msg.type != MSG_JOIN_ROOM) {
-    return -1;
-  }
+  if (!parse_json_message(buf, &msg) || msg.type != MSG_JOIN_ROOM)
+    return 3;
 
   return msg.players > 0 ? msg.players : 3;
 }

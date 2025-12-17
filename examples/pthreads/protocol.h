@@ -11,7 +11,6 @@ typedef enum {
   MSG_ERROR,
 
   // новые — для работы комнат
-  MSG_ROOM_JOINED,  // parent → client
   MSG_ROOM_READY,   // room → client
   MSG_ROOM_FORWARD, // room → all clients (chat)
   MSG_ROOM_EVENT    // room → client (например, начало игры)

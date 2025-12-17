@@ -1,4 +1,5 @@
 #include "room_manager.h"
+#include "common.h"
 
 RoomProcess *find_room_by_participants(int desired_participants) {
   for (int i = 0; i < MAX_ROOMS; i++) {
@@ -12,6 +13,15 @@ RoomProcess *find_room_by_participants(int desired_participants) {
   }
   printf("[DEBUG] Не найдена комната с лимитом %d\n", desired_participants);
   return NULL;
+}
+
+int find_free_room_slot() {
+  for (int i = 0; i < MAX_ROOMS; i++) {
+    if (rooms[i].pid == 0) {
+      return i;
+    }
+  }
+  return -1;
 }
 
 int create_room_process(int room_id, int max_participants) {
@@ -55,20 +65,21 @@ int create_room_process(int room_id, int max_participants) {
 }
 
 void transfer_to_room(int client_fd, int desired_players) {
-  RoomProcess *room = find_room_by_participants(desired_players);
-  if (!room)
-    return;
-
-  // отправляем JSON
-  Message m = {0};
-  m.type = MSG_JOIN_ROOM;
-
-  char *json = build_json_message(m.type, &m);
-  send_all(room->control_fd, json, strlen(json));
-  free(json);
+  RoomProcess *r = find_free_room(desired_players);
+  if (!r) {
+    int slot = find_free_room_slot();
+    if (slot < 0) {
+      // TODO: send ERROR to client
+      return;
+    }
+    create_room_process(slot, desired_players);
+    r = &rooms[slot];
+  }
 
   // отправляем FD
-  send_fd(room->control_fd, client_fd);
+  send_fd(r->control_fd, client_fd);
+
+  r->client_count++;
 }
 
 void remove_client(int client_fd) {
@@ -80,4 +91,15 @@ void remove_client(int client_fd) {
       break;
     }
   }
+}
+
+RoomProcess *find_free_room(int needed_players) {
+  for (int i = 0; i < MAX_ROOMS; i++) {
+    if (rooms[i].pid != 0 &&
+        rooms[i].client_count < rooms[i].max_participants &&
+        rooms[i].max_participants == needed_players) {
+      return &rooms[i];
+    }
+  }
+  return NULL;
 }

@@ -1,6 +1,21 @@
 #include "client_utils.h"
 #include <stdlib.h>
 
+// Добавьте эти строки в начало файла cli_pizdec.c:
+volatile sig_atomic_t resized = 0;
+int should_quit = 0;
+Message message_history[100];
+int message_count = 0;
+GameAction game_history[100];
+int game_history_count = 0;
+Card player_hand[20];
+PlayerInfo players[6];
+char player_name[50] = "Player";
+Card top_card;
+Color current_color = COL_RED;
+bool direction_clockwise = true;
+int time_left = 30;
+
 int main(int argc, char *argv[]) {
   if (argc != 2) {
     printf("UNO Game Client\n");

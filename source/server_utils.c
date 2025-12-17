@@ -293,7 +293,6 @@ char *handle_client_command(int client_fd, const char *command) {
 
   } else if (strncmp(command, "/join ", 6) == 0) {
     // FIXME: тут тоже пипяо будет
-    int room_id = atoi(command + 6);
 
     if (room) {
       cJSON_AddStringToObject(response, "error", "Already in a room");
@@ -817,17 +816,18 @@ Room *find_room_by_desired_players(int desired_players) {
   pthread_mutex_lock(&rooms_mutex);
   Room *current = rooms;
   Room *best_match = NULL;
+  int best_match_size = -1;
 
   while (current) {
     if (current->is_active && current->game.state == WAITING_FOR_PLAYERS &&
         current->game.players_count < MAX_PLAYERS_PER_ROOM &&
         current->game.players_count < desired_players) {
 
-      // Ищем комнату с максимальным количеством игроков, но не превышающим
-      // desired
-      if (!best_match ||
-          current->game.players_count > best_match->game.players_count) {
+      // Ищем комнату с количеством игроков, наиболее близким к желаемому
+      if (!best_match || (current->game.players_count > best_match_size &&
+                          current->game.players_count <= desired_players)) {
         best_match = current;
+        best_match_size = current->game.players_count;
       }
     }
     current = current->next;
@@ -835,4 +835,60 @@ Room *find_room_by_desired_players(int desired_players) {
 
   pthread_mutex_unlock(&rooms_mutex);
   return best_match;
+}
+
+bool check_and_start_game(Room *room, int desired_players) {
+  if (!room || room->game.state != WAITING_FOR_PLAYERS) {
+    return false;
+  }
+
+  if (room->game.players_count >= desired_players &&
+      room->game.players_count >= MIN_PLAYERS_PER_ROOM) {
+
+    // Автоматически начинаем игру
+    printf("Room %d has enough players (%d/%d), starting game...\n", room->id,
+           room->game.players_count, desired_players);
+
+    // Раздаем карты
+    for (int i = 0; i < room->game.players_count; i++) {
+      for (int j = 0; j < 7; j++) {
+        room->game.players[i].hand[room->game.players[i].hand_size++] =
+            draw_card(&room->game.draw_pile);
+      }
+    }
+
+    // Выбираем стартовую карту
+    do {
+      room->game.top_card = draw_card(&room->game.draw_pile);
+    } while (room->game.top_card.color == COL_WILD);
+
+    room->game.discard_pile.cards[0] = room->game.top_card;
+    room->game.discard_pile.top = 1;
+    room->game.current_color = room->game.top_card.color;
+
+    // Выбираем случайного первого игрока
+    room->game.current_player = rand() % room->game.players_count;
+    room->game.players[room->game.current_player].is_turn = true;
+    room->game.state = IN_PROGRESS;
+
+    // Уведомляем всех игроков
+    char msg[200];
+    snprintf(msg, sizeof(msg), "Game started automatically! First player: %s",
+             room->game.players[room->game.current_player].name);
+    broadcast_to_room(room, msg, -1);
+
+    // Отправляем всем игрокам обновленное состояние
+    for (int i = 0; i < room->game.players_count; i++) {
+      char *game_state =
+          handle_room_command(room, room->game.players[i].fd, "/state");
+      if (game_state) {
+        send(room->game.players[i].fd, game_state, strlen(game_state), 0);
+        free(game_state);
+      }
+    }
+
+    return true;
+  }
+
+  return false;
 }

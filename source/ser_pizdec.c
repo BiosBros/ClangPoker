@@ -1,6 +1,10 @@
 #include "server_utils.h"
 
 volatile sig_atomic_t running = 1;
+int client_count = 0;
+Room *rooms = NULL;
+pthread_mutex_t rooms_mutex = PTHREAD_MUTEX_INITIALIZER;
+ClientInfo clients[MAX_CONNECTIONS];
 
 int main() {
   int server_fd = -1, epoll_fd = -1;

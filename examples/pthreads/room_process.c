@@ -2,88 +2,77 @@
 #include "protocol.h"
 
 void room_process(int room_id, int parent_fd, int max_participants) {
-  printf("[Комната %d PID=%d] Запущена. Максимум участников: %d\n", room_id,
-         getpid(), max_participants);
+  printf("[Комната %d PID=%d] Старт. Ждем %d участников.\n", room_id, getpid(),
+         max_participants);
 
   set_nonblocking(parent_fd);
 
-  int epoll_fd = epoll_create1(0);
-  if (epoll_fd < 0) {
-    perror("epoll_create1");
+  int ep = epoll_create1(0);
+  if (ep < 0) {
+    perror("epoll_create");
     exit(1);
   }
 
   struct epoll_event ev;
-  ev.events = EPOLLIN; // Edge-triggered режим
+  ev.events = EPOLLIN;
   ev.data.fd = parent_fd;
-  if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, parent_fd, &ev) < 0) {
-    perror("epoll_ctl parent");
-    exit(1);
-  }
+  epoll_ctl(ep, EPOLL_CTL_ADD, parent_fd, &ev);
 
-  int participants[max_participants];
+  int users[max_participants];
   int count = 0;
-  char buf[1024];
 
-  struct epoll_event events[10];
+  struct epoll_event events[32];
+  char buf[2048];
 
   while (1) {
-    int n = epoll_wait(epoll_fd, events, 10, -1);
-    if (n < 0) {
-      perror("epoll_wait");
+    int n = epoll_wait(ep, events, 32, -1);
+    if (n < 0)
       continue;
-    }
 
     for (int i = 0; i < n; i++) {
       int fd = events[i].data.fd;
 
+      // Новый клиент засунут родителем
       if (fd == parent_fd) {
-        // сервер прислал JSON + клиентский FD
-        ssize_t n = recv(fd, buf, sizeof(buf) - 1, 0);
-        if (n <= 0)
-          continue;
-        buf[n] = 0;
-
-        Message msg;
-        if (!parse_json_message(buf, &msg))
+        int newfd = receive_fd(parent_fd);
+        if (newfd < 0)
           continue;
 
-        if (msg.type == MSG_JOIN_ROOM) {
+        users[count++] = newfd;
+        set_nonblocking(newfd);
 
-          int client_fd = receive_fd(parent_fd);
+        ev.events = EPOLLIN;
+        ev.data.fd = newfd;
+        epoll_ctl(ep, EPOLL_CTL_ADD, newfd, &ev);
 
-          participants[count++] = client_fd;
+        // Когда набрали всех — уведомляем
+        if (count == max_participants) {
+          Message m = {.type = MSG_ROOM_READY};
+          strcpy(m.text, "room is ready");
 
-          // уведомить клиента
-          Message ready = {.type = MSG_ROOM_READY};
-          strcpy(ready.text, "joined room");
-          char *out = build_json_message(ready.type, &ready);
-          send_all(client_fd, out, strlen(out));
-          free(out);
-
-          // слушать клиента в epoll
-          ev.events = EPOLLIN;
-          ev.data.fd = client_fd;
-          epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &ev);
+          char *js = build_json_message(MSG_ROOM_READY, &m);
+          for (int k = 0; k < count; k++)
+            send_all(users[k], js, strlen(js));
+          free(js);
         }
-      } else {
-        ssize_t n = recv(fd, buf, sizeof(buf) - 1, 0);
-        if (n <= 0)
-          continue;
-        buf[n] = 0;
+        continue;
+      }
 
-        Message msg;
-        if (!parse_json_message(buf, &msg))
-          continue;
+      // Сообщения от пользователей
+      ssize_t r = recv(fd, buf, sizeof(buf) - 1, 0);
+      if (r <= 0)
+        continue;
+      buf[r] = 0;
 
-        // чат в комнате → форвард всем
-        if (msg.type == MSG_CHAT) {
-          for (int k = 0; k < count; k++) {
-            char *out = build_json_message(MSG_ROOM_FORWARD, &msg);
-            send_all(participants[k], out, strlen(out));
-            free(out);
-          }
-        }
+      Message msg;
+      if (!parse_json_message(buf, &msg))
+        continue;
+
+      if (msg.type == MSG_CHAT) {
+        char *js = build_json_message(MSG_ROOM_FORWARD, &msg);
+        for (int k = 0; k < count; k++)
+          send_all(users[k], js, strlen(js));
+        free(js);
       }
     }
   }
