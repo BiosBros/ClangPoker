@@ -12,9 +12,7 @@
 
 char server_ip[INET_ADDRSTRLEN];
 
-// Функции предобработки данных
 void clean_input(char *input) {
-  // Убираем символы новой строки
   size_t len = strlen(input);
   if (len > 0 && (input[len - 1] == '\n' || input[len - 1] == '\r')) {
     input[len - 1] = '\0';
@@ -77,19 +75,16 @@ void interactive_mode(int sock) {
   printf("\n=== ДОБРО ПОЖАЛОВАТЬ В ИГРОВОЙ КЛИЕНТ ===\n");
   printf("Все сообщения обмениваются в формате JSON\n");
 
-  // Этап 1: Получаем приветственное сообщение
   if (receive_json_message(sock, &response)) {
     if (response.type == MSG_SYSTEM && response.text[0]) {
       printf("Сервер: %s\n", response.text);
     }
   }
 
-  // Этап 2: Ввод имени
   printf("Введите ваше имя: ");
   fgets(user_input, sizeof(user_input), stdin);
   clean_input(user_input);
 
-  // Проверка имени
   if (strlen(user_input) == 0) {
     strcpy(user_input, "Гость");
   } else if (strlen(user_input) > 31) {
@@ -101,7 +96,6 @@ void interactive_mode(int sock) {
   send_json_message(sock, MSG_HELLO, &msg);
   printf("Отправлено имя: %s\n", user_input);
 
-  // Этап 3: Ввод количества игроков
   if (receive_json_message(sock, &response)) {
     if (response.type == MSG_SYSTEM && response.text[0]) {
       printf("Сервер: %s\n", response.text);
@@ -120,18 +114,17 @@ void interactive_mode(int sock) {
   send_json_message(sock, MSG_JOIN_ROOM, &msg);
   printf("Запрошена комната на %d участников\n", players);
 
-  // Этап 4: Ожидание подтверждения и переход в комнату
   if (receive_json_message(sock, &response)) {
     if (response.type == MSG_SYSTEM && response.text[0]) {
-      printf("Сервер: %s\n", response.text);
+      printf("Server: %s\n", response.text);
     }
   }
 
-  printf("\n=== ВЫ В КОМНАТЕ ===\n");
-  printf("Введите сообщения для общения с другими участниками\n");
-  printf("Для выхода введите 'exit' или нажмите Ctrl+C\n\n");
+  printf("\n=== maybe you are in room, unless there are more than 10 rooms lol "
+         "===\n");
+  printf("type something to chat with other roommates\n");
+  printf("to exit type 'exit' or click Ctrl+C\n\n");
 
-  // Основной цикл обмена сообщениями
   while (1) {
     FD_ZERO(&readfds);
     FD_SET(sock, &readfds);
@@ -144,13 +137,12 @@ void interactive_mode(int sock) {
       break;
     }
 
-    // Проверяем ввод пользователя
     if (FD_ISSET(STDIN_FILENO, &readfds)) {
       fgets(user_input, sizeof(user_input), stdin);
       clean_input(user_input);
 
       if (strcmp(user_input, "exit") == 0) {
-        printf("Выход...\n");
+        printf("Exiting...\n");
         break;
       }
 
@@ -159,7 +151,6 @@ void interactive_mode(int sock) {
       send_json_message(sock, MSG_CHAT, &msg);
     }
 
-    // Проверяем сообщения от сервера
     if (FD_ISSET(sock, &readfds)) {
       if (receive_json_message(sock, &response)) {
         switch (response.type) {
@@ -172,14 +163,14 @@ void interactive_mode(int sock) {
           }
           break;
         case MSG_ERROR:
-          printf("ОШИБКА: %s\n", response.text);
+          printf("ERROR: %s\n", response.text);
           break;
         default:
-          printf("Неизвестный тип сообщения\n");
+          printf("Unknown type of message\n");
           break;
         }
       } else {
-        printf("Соединение с сервером разорвано\n");
+        printf("Connection to the server is lost\n");
         break;
       }
     }
@@ -193,8 +184,8 @@ int main(int argc, char *argv[]) {
   }
   snprintf(server_ip, INET_ADDRSTRLEN, "%s", argv[1]);
 
-  printf("=== ИГРОВОЙ КЛИЕНТ ===\n");
-  printf("Подключение к серверу...\n");
+  printf("=== GAME CLIENT ===\n");
+  printf("Connecting to server...\n");
 
   int sock = connect_to_server();
   if (sock < 0) {
@@ -204,6 +195,6 @@ int main(int argc, char *argv[]) {
   interactive_mode(sock);
 
   close(sock);
-  printf("Клиент завершил работу\n");
+  printf("Client terminated\n");
   return 0;
 }
